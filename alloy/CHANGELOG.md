@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.0 - 2026-09-11
+
+### Fixed
+- Container-sourced log lines (anything with a `container_name` label) no longer inherit journal priority as their `level` — dockerd tags all container stderr as priority `err` regardless of actual content, mislabeling routine info-level output as errors. The level is now re-parsed from the line's own text; unrecognized lines are left unlevelled so Loki's `detected_level` applies instead. Native (non-container) journal entries are unaffected. Ported from upstream PR [#11](https://github.com/ecohash-co/ha-addon-alloy/pull/11) (closed, unmerged), generalized to respect `label_overrides` renames of `container_name`/`level`.
+
 ## 1.1.0 - 2026-09-11
 
 ### Added

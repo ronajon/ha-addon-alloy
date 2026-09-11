@@ -132,6 +132,36 @@ loki.process "journal" {
     expression = "^\\\\s*$"
   }
 
+  // dockerd logs every container's stdout at journal priority "info" and
+  // stderr at "err" regardless of message content, so the priority-based
+  // level is meaningless for container lines. Drop it and re-parse the level
+  // from the line itself; lines without a recognisable token stay unlevelled
+  // so Loki's own level detection can take over.
+  stage.match {
+    selector = "{${CONTAINER_NAME_TARGET}=~\\".+\\"}"
+
+    stage.label_drop {
+      values = ["${LEVEL_TARGET}"]
+    }
+  }
+
+  stage.match {
+    selector = "{${CONTAINER_NAME_TARGET}=~\\".+\\"} |~ \\"(?i)\\\\\\\\b(trace|debug|info|notice|warning|warn|error|err|critical|crit|fatal)\\\\\\\\b\\""
+
+    stage.regex {
+      expression = "(?i)\\\\b(?P<level_token>trace|debug|info|notice|warning|warn|error|err|critical|crit|fatal)\\\\b"
+    }
+
+    stage.template {
+      source   = "level_token"
+      template = "{{ if eq (ToLower .Value) \\"warn\\" }}warning{{ else if eq (ToLower .Value) \\"err\\" }}error{{ else if eq (ToLower .Value) \\"crit\\" }}critical{{ else }}{{ ToLower .Value }}{{ end }}"
+    }
+
+    stage.labels {
+      values = { ${LEVEL_TARGET} = "level_token" }
+    }
+  }
+
   forward_to = [loki.write.loki.receiver]
 }
 
