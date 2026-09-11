@@ -4,6 +4,7 @@ set -e
 CONFIG_DIR="/etc/alloy"
 CONFIG_FILE="${CONFIG_DIR}/config.alloy"
 OPTIONS_FILE="/data/options.json"
+LABEL_NAME_RE='^[a-zA-Z_][a-zA-Z0-9_]*$'
 
 mkdir -p "${CONFIG_DIR}" /data/alloy
 
@@ -11,6 +12,54 @@ mkdir -p "${CONFIG_DIR}" /data/alloy
 LOKI_URL=$(jq -r '.loki_url' "${OPTIONS_FILE}")
 LOG_LEVEL=$(jq -r '.log_level // "info"' "${OPTIONS_FILE}")
 ADDITIONAL_CONFIG=$(jq -r '.additional_config // ""' "${OPTIONS_FILE}")
+
+# label_overrides is a JSON-object-shaped string option (same pattern as
+# additional_config: a plain str? field the user fills with structured
+# text), e.g. {"job": "home-assistant", "hostname": "host"}. Normalize
+# unset/null to an empty object so downstream lookups always have valid
+# JSON to work with, then fail loudly on genuinely malformed input rather
+# than silently generating a broken pipeline.
+LABEL_OVERRIDES_RAW=$(jq -r '.label_overrides // "{}"' "${OPTIONS_FILE}")
+if [ -z "${LABEL_OVERRIDES_RAW}" ] || [ "${LABEL_OVERRIDES_RAW}" = "null" ]; then
+    LABEL_OVERRIDES_RAW="{}"
+fi
+if ! echo "${LABEL_OVERRIDES_RAW}" | jq -e . >/dev/null 2>&1; then
+    echo "ERROR: label_overrides is not valid JSON: ${LABEL_OVERRIDES_RAW}" >&2
+    exit 1
+fi
+
+label_override() {
+    # $1 = override key, $2 = default
+    echo "${LABEL_OVERRIDES_RAW}" | jq -r --arg f "$1" --arg d "$2" '.[$f] // $d'
+}
+
+# job is a static label value (not derived from a journal field), so its
+# override replaces the value itself.
+JOB_LABEL=$(label_override job systemd-journal)
+if [[ "${JOB_LABEL}" == *'"'* ]]; then
+    echo "ERROR: label_overrides.job must not contain a double-quote character" >&2
+    exit 1
+fi
+
+# The rest are all journal-field-derived via relabel rules, so their
+# override renames the target_label instead of changing a value.
+UNIT_TARGET=$(label_override unit unit)
+HOSTNAME_TARGET=$(label_override hostname hostname)
+SYSLOG_ID_TARGET=$(label_override syslog_identifier syslog_identifier)
+TRANSPORT_TARGET=$(label_override transport transport)
+CONTAINER_NAME_TARGET=$(label_override container_name container_name)
+LEVEL_TARGET=$(label_override level level)
+
+for pair in "unit:${UNIT_TARGET}" "hostname:${HOSTNAME_TARGET}" \
+            "syslog_identifier:${SYSLOG_ID_TARGET}" "transport:${TRANSPORT_TARGET}" \
+            "container_name:${CONTAINER_NAME_TARGET}" "level:${LEVEL_TARGET}"; do
+    field="${pair%%:*}"
+    target="${pair#*:}"
+    if ! [[ "${target}" =~ ${LABEL_NAME_RE} ]]; then
+        echo "ERROR: label_overrides.${field} = '${target}' is not a valid label name (must match ${LABEL_NAME_RE})" >&2
+        exit 1
+    fi
+done
 
 # Detect journal path
 JOURNAL_PATH="/var/log/journal"
@@ -23,6 +72,9 @@ echo " Grafana Alloy for Home Assistant"
 echo " Loki URL: ${LOKI_URL}"
 echo " Journal path: ${JOURNAL_PATH}"
 echo " Log level: ${LOG_LEVEL}"
+if [ "${LABEL_OVERRIDES_RAW}" != "{}" ]; then
+    echo " Label overrides: ${LABEL_OVERRIDES_RAW}"
+fi
 echo "-----------------------------------------------------------"
 
 # Generate Alloy config
@@ -40,7 +92,7 @@ loki.source.journal "journal" {
   forward_to   = [loki.process.journal.receiver]
   relabel_rules = loki.relabel.journal.rules
   labels       = {
-    job = "systemd-journal",
+    job = "${JOB_LABEL}",
   }
 }
 
@@ -50,27 +102,27 @@ loki.relabel "journal" {
 
   rule {
     source_labels = ["__journal__systemd_unit"]
-    target_label  = "unit"
+    target_label  = "${UNIT_TARGET}"
   }
   rule {
     source_labels = ["__journal__hostname"]
-    target_label  = "hostname"
+    target_label  = "${HOSTNAME_TARGET}"
   }
   rule {
     source_labels = ["__journal_syslog_identifier"]
-    target_label  = "syslog_identifier"
+    target_label  = "${SYSLOG_ID_TARGET}"
   }
   rule {
     source_labels = ["__journal__transport"]
-    target_label  = "transport"
+    target_label  = "${TRANSPORT_TARGET}"
   }
   rule {
     source_labels = ["__journal_container_name"]
-    target_label  = "container_name"
+    target_label  = "${CONTAINER_NAME_TARGET}"
   }
   rule {
     source_labels = ["__journal_priority_keyword"]
-    target_label  = "level"
+    target_label  = "${LEVEL_TARGET}"
   }
 }
 
