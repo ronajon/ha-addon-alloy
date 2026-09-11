@@ -1,5 +1,17 @@
 #!/usr/bin/with-contenv bash
+
+OPTIONS_FILE="/data/options.json"
+DISABLE_REPORTING=$(jq -r '.disable_reporting // true' "${OPTIONS_FILE}")
+
+EXTRA_ARGS=()
+if [ "${DISABLE_REPORTING}" = "true" ]; then
+    EXTRA_ARGS+=(--disable-reporting)
+fi
+
+echo "Disable reporting: ${DISABLE_REPORTING}"
+
 exec /usr/bin/alloy run \
     --server.http.listen-addr=0.0.0.0:12345 \
     --storage.path=/data/alloy \
+    "${EXTRA_ARGS[@]}" \
     /etc/alloy/config.alloy
