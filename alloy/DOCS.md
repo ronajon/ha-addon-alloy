@@ -29,7 +29,7 @@ All journal entries are shipped to Loki with these labels:
 | `syslog_identifier` | process identifier | `syslog_identifier` — renames the **label key** |
 | `transport` | journal transport type | `transport` — renames the **label key** |
 | `container_name` | Docker container name (for add-ons) | `container_name` — renames the **label key** |
-| `level` | log priority (debug, info, warning, error, etc.) | `level` — renames the **label key** |
+| `level` | log priority (debug, info, warning, error, etc.), reparsed from message content for container-sourced entries — see below | `level` — renames the **label key** |
 
 ### Overriding labels
 
@@ -45,6 +45,16 @@ This does two different things depending on the key, because `job` isn't derived
 - Every other key (`unit`, `hostname`, `syslog_identifier`, `transport`, `container_name`, `level`) is derived from a journal field via a relabel rule — overriding it **renames the label itself** (e.g. `{"hostname": "host"}` makes entries carry a `host` label instead of `hostname`), useful for matching a label naming scheme used by other log shippers (Promtail, syslog-ng, other Alloy instances) writing to the same Loki instance.
 
 Target label names must match `^[a-zA-Z_][a-zA-Z0-9_]*$` (standard Prometheus/Loki label name rules) — the add-on fails to start with a clear error instead of generating a broken pipeline if one doesn't.
+
+### Container log level correction
+
+dockerd logs every container's stdout at journal priority `info` and stderr at `err`, regardless of what the container actually wrote — so any add-on/container that logs to stderr (a common pattern, not an error indicator) had every single line mislabeled `level=error` upstream. For any entry carrying a `container_name` label (or your renamed equivalent), this add-on now:
+
+1. drops the priority-derived `level` label,
+2. re-parses the real level from the line's own text (case-insensitive match on `trace`/`debug`/`info`/`notice`/`warning`/`warn`/`error`/`err`/`critical`/`crit`/`fatal`, normalized to `warning`/`error`/`critical`/etc.), and
+3. leaves lines with no recognizable level token unlabeled, so Loki's own `detected_level` can take over instead.
+
+Native (non-container) journal entries are unaffected — they keep the accurate priority-based level. This targets the same root cause as upstream issue/PR discussion around container log levels, generalized here to respect `label_overrides` if you've renamed `container_name` or `level`.
 
 ## Debug UI
 
